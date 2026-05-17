@@ -29,6 +29,10 @@ yarn-error.log*
 # local env files
 .env*.local
 
+# Google Cloud / GA4 local key (use secret.json or GA_SERVICE_ACCOUNT_PATH)
+/secret.json
+/ga4-key.json
+
 # vercel
 .vercel
 

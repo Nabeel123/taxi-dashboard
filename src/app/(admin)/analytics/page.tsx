@@ -11,6 +11,8 @@ import { TripsBarChart } from "@/components/dashboard/charts/TripsBarChart";
 import { EmptyState } from "@/components/dashboard/EmptyState";
 import { BadgeDollar, CarIcon, MapDistance, PlaneIcon } from "@/components/dashboard/icons";
 
+import { GaAudienceSection } from "@/components/dashboard/GaAudienceSection";
+
 import { getBookings } from "@/services/bookings";
 import {
   computeKpis,
@@ -45,6 +47,8 @@ export default async function AnalyticsPage() {
         title="Revenue & route analytics"
         description="Understand demand patterns, service mix and peak operations windows."
       />
+
+      <GaAudienceSection />
 
       <section className="grid grid-cols-1 gap-3 sm:grid-cols-2 sm:gap-4 lg:grid-cols-4">
         <KpiCard

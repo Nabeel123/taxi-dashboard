@@ -3,10 +3,12 @@
   "version": "2.3.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
+    "dev": "next dev --webpack",
+    "dev:turbo": "next dev --turbopack",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint ."
+    "lint": "eslint .",
+    "ga4:list-properties": "node scripts/list-ga4-properties.mjs"
   },
   "dependencies": {
     "@fullcalendar/core": "^6.1.19",
@@ -15,6 +17,8 @@
     "@fullcalendar/list": "^6.1.19",
     "@fullcalendar/react": "^6.1.19",
     "@fullcalendar/timegrid": "^6.1.19",
+    "@google-analytics/admin": "^9.1.0",
+    "@google-analytics/data": "^6.0.0",
     "@supabase/supabase-js": "^2.105.4",
     "@tailwindcss/postcss": "^4.1.17",
     "apexcharts": "^4.7.0",
