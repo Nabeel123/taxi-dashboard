@@ -9,11 +9,20 @@ export interface GaDemographicRow {
   value: number;
 }
 
+/** One day in the GA4 property timezone (YYYY-MM-DD). */
+export interface GaActiveUsersPoint {
+  date: string;
+  activeUsers: number;
+  sessions: number;
+}
+
 export type GaAudienceSnapshot =
   | {
       status: "ok";
       dateRangeLabel: string;
       propertyLabel: string;
+      /** Daily active users + sessions (standard RunReport, `date`; property reporting timezone). */
+      activeUsersByDay: GaActiveUsersPoint[];
       gender: GaDemographicRow[];
       age: GaDemographicRow[];
       countries: GaDemographicRow[];
@@ -388,6 +397,67 @@ async function resolveNumericPropertyId(): Promise<{
   }
 }
 
+/** Analytics Data API `date` dimension values are usually YYYYMMDD. */
+function normalizeGaDateRaw(raw: string): string {
+  const t = raw.trim();
+  if (/^\d{8}$/.test(t)) {
+    return `${t.slice(0, 4)}-${t.slice(4, 6)}-${t.slice(6, 8)}`;
+  }
+  if (/^\d{4}-\d{2}-\d{2}$/.test(t)) return t;
+  return t;
+}
+
+const ACTIVE_USERS_CHART_DAYS = 14;
+
+async function runActiveUsersByDay(
+  client: BetaAnalyticsDataClient,
+  propertyNumericId: string,
+  dayCount: number,
+): Promise<GaActiveUsersPoint[]> {
+  const [resp] = await client.runReport({
+    property: `properties/${propertyNumericId}`,
+    dateRanges: [{ startDate: `${dayCount}daysAgo`, endDate: "today" }],
+    dimensions: [{ name: "date" }],
+    metrics: [{ name: "activeUsers" }, { name: "sessions" }],
+    orderBys: [{ dimension: { dimensionName: "date" }, desc: false }],
+    limit: 64,
+    keepEmptyRows: true,
+  });
+
+  const out: GaActiveUsersPoint[] = [];
+  for (const row of resp.rows ?? []) {
+    const rawDate = row.dimensionValues?.[0]?.value ?? "";
+    const rawUsers = row.metricValues?.[0]?.value ?? "0";
+    const rawSessions = row.metricValues?.[1]?.value ?? "0";
+    const activeUsers = Number(rawUsers);
+    const sessions = Number(rawSessions);
+    const date = normalizeGaDateRaw(rawDate);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) continue;
+    if (!Number.isFinite(activeUsers) || !Number.isFinite(sessions)) continue;
+    out.push({
+      date,
+      activeUsers: Math.max(0, Math.round(activeUsers)),
+      sessions: Math.max(0, Math.round(sessions)),
+    });
+  }
+  out.sort((a, b) => a.date.localeCompare(b.date));
+  return out;
+}
+
+async function safeRunActiveUsersByDay(
+  client: BetaAnalyticsDataClient,
+  propertyNumericId: string,
+  dayCount: number,
+): Promise<GaActiveUsersPoint[]> {
+  try {
+    return await runActiveUsersByDay(client, propertyNumericId, dayCount);
+  } catch (e) {
+    const formatted = formatGoogleRpcError(e);
+    if (isGlobalGaDataApiError(formatted)) throw e;
+    return [];
+  }
+}
+
 async function safeRunRealtimeCountryBreakdown(
   client: BetaAnalyticsDataClient,
   propertyNumericId: string,
@@ -530,7 +600,8 @@ async function loadGaAudienceSnapshot(): Promise<GaAudienceSnapshot> {
       );
       countriesSource = "standard";
     }
-    const [gender, age, channels, devices] = await Promise.all([
+    const [activeUsersByDay, gender, age, channels, devices] = await Promise.all([
+      safeRunActiveUsersByDay(dataClient, propertyNumericId, ACTIVE_USERS_CHART_DAYS),
       safeRunDimensionBreakdown(dataClient, propertyNumericId, "userGender"),
       safeRunDimensionBreakdown(dataClient, propertyNumericId, "userAgeBracket"),
       safeRunDimensionBreakdown(
@@ -544,10 +615,11 @@ async function loadGaAudienceSnapshot(): Promise<GaAudienceSnapshot> {
 
     return {
       status: "ok",
-      dateRangeLabel: "Gender, age, channel & device: last 28 days",
+      dateRangeLabel: `Users & sessions: last ${ACTIVE_USERS_CHART_DAYS} days · Gender, age, channel & device: last 28 days`,
       propertyLabel:
         process.env.NEXT_PUBLIC_GA_MEASUREMENT_ID?.trim() ??
         `Property ${propertyNumericId}`,
+      activeUsersByDay,
       gender,
       age,
       countries,
@@ -573,7 +645,7 @@ async function loadGaAudienceSnapshot(): Promise<GaAudienceSnapshot> {
 
 const getCachedGaAudienceSnapshot = unstable_cache(
   async () => loadGaAudienceSnapshot(),
-  ["ga-audience-demographics", "v14-realtime-country"],
+  ["ga-audience-demographics", "v16-sessions-daily-trend"],
   { revalidate: 30 },
 );
 

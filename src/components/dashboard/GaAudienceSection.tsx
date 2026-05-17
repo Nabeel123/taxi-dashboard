@@ -1,5 +1,6 @@
 import { SectionCard } from "@/components/dashboard/SectionCard";
 import { EmptyState } from "@/components/dashboard/EmptyState";
+import { GaActiveUsersChart } from "@/components/dashboard/charts/GaActiveUsersChart";
 import {
   getGaAudienceSnapshot,
   type GaDemographicRow,
@@ -75,6 +76,19 @@ export async function GaAudienceSection() {
             : " · Country: last 28 days (no realtime activity — showing standard report)"}
         </p>
       </div>
+      <SectionCard
+        title="Active users & sessions"
+        description="Daily unique users and session counts (GA4 Reporting API, last 14 days). Not the Realtime snapshot."
+      >
+        {snap.activeUsersByDay.length === 0 ? (
+          <EmptyState
+            title="No traffic trend yet"
+            description="Once GA4 has processed traffic for the last two weeks, daily users and sessions will appear here."
+          />
+        ) : (
+          <GaActiveUsersChart data={snap.activeUsersByDay} />
+        )}
+      </SectionCard>
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
         <SectionCard title="Gender" description="Requires Google signals and enough returning traffic.">
           <DemographicBarList
