@@ -69,7 +69,10 @@ export async function GaAudienceSection() {
       <div>
         <h2 className="text-lg font-semibold text-gray-900 dark:text-white/90">Website audience</h2>
         <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
-          {snap.propertyLabel} · {snap.dateRangeLabel} · active users (unless noted)
+          {snap.propertyLabel} · {snap.dateRangeLabel}
+          {snap.countriesSource === "realtime"
+            ? " · Country: GA4 realtime (active users)"
+            : " · Country: last 28 days (no realtime activity — showing standard report)"}
         </p>
       </div>
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
@@ -87,11 +90,18 @@ export async function GaAudienceSection() {
             emptyDescription="Same requirements as gender — signals plus volume in the reporting window."
           />
         </SectionCard>
-        <SectionCard title="Country" description="Top countries by active users.">
+        <SectionCard
+          title="Country"
+          description={
+            snap.countriesSource === "realtime"
+              ? "Where active users are right now (GA4 Realtime API, ~last 30 minutes)."
+              : "Top countries by active users — standard report (last 28 days) because realtime had no traffic."
+          }
+        >
           <DemographicBarList
             rows={snap.countries}
-            emptyTitle="No country data"
-            emptyDescription="No sessions with geo in this range yet, or data is still processing."
+            emptyTitle="No country data yet"
+            emptyDescription="Open the site in a browser (or send page_view events); realtime geo appears once GA4 receives hits with IP-derived location. If you use a blocker or server-side only measurement, enable web data collection for this stream."
           />
         </SectionCard>
       </div>

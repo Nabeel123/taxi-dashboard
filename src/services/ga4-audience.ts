@@ -17,9 +17,9 @@ export type GaAudienceSnapshot =
       gender: GaDemographicRow[];
       age: GaDemographicRow[];
       countries: GaDemographicRow[];
-      /** Default channel grouping (e.g. Direct, Organic Search) when data exists. */
+      /** Whether `countries` came from runRealtimeReport or standard RunReport fallback. */
+      countriesSource: "realtime" | "standard";
       channels: GaDemographicRow[];
-      /** Device category (desktop, mobile, tablet). */
       devices: GaDemographicRow[];
     }
   | {
@@ -388,6 +388,45 @@ async function resolveNumericPropertyId(): Promise<{
   }
 }
 
+async function safeRunRealtimeCountryBreakdown(
+  client: BetaAnalyticsDataClient,
+  propertyNumericId: string,
+  limit = 10,
+): Promise<GaDemographicRow[]> {
+  try {
+    return await runRealtimeCountryBreakdown(client, propertyNumericId, limit);
+  } catch (e) {
+    const formatted = formatGoogleRpcError(e);
+    if (isGlobalGaDataApiError(formatted)) throw e;
+    return [];
+  }
+}
+
+async function runRealtimeCountryBreakdown(
+  client: BetaAnalyticsDataClient,
+  propertyNumericId: string,
+  limit = 10,
+): Promise<GaDemographicRow[]> {
+  const [resp] = await client.runRealtimeReport({
+    property: `properties/${propertyNumericId}`,
+    dimensions: [{ name: "country" }],
+    metrics: [{ name: "activeUsers" }],
+    orderBys: [{ metric: { metricName: "activeUsers" }, desc: true }],
+    limit,
+  });
+
+  const dimension = "country";
+  const out: GaDemographicRow[] = [];
+  for (const row of resp.rows ?? []) {
+    const rawDim = row.dimensionValues?.[0]?.value ?? "(not set)";
+    const rawMetric = row.metricValues?.[0]?.value ?? "0";
+    const value = Number(rawMetric);
+    if (!Number.isFinite(value)) continue;
+    out.push({ label: formatDimensionLabel(dimension, rawDim), value });
+  }
+  return out;
+}
+
 async function runDimensionBreakdown(
   client: BetaAnalyticsDataClient,
   propertyNumericId: string,
@@ -475,12 +514,22 @@ async function loadGaAudienceSnapshot(): Promise<GaAudienceSnapshot> {
   const dataClient = new BetaAnalyticsDataClient(options);
 
   try {
-    const countries = await safeRunDimensionBreakdown(
+    let countries = await safeRunRealtimeCountryBreakdown(
       dataClient,
       propertyNumericId,
-      "country",
       10,
     );
+    let countriesSource: "realtime" | "standard" = "realtime";
+    const countryTotal = countries.reduce((s, r) => s + r.value, 0);
+    if (countries.length === 0 || countryTotal === 0) {
+      countries = await safeRunDimensionBreakdown(
+        dataClient,
+        propertyNumericId,
+        "country",
+        10,
+      );
+      countriesSource = "standard";
+    }
     const [gender, age, channels, devices] = await Promise.all([
       safeRunDimensionBreakdown(dataClient, propertyNumericId, "userGender"),
       safeRunDimensionBreakdown(dataClient, propertyNumericId, "userAgeBracket"),
@@ -495,13 +544,14 @@ async function loadGaAudienceSnapshot(): Promise<GaAudienceSnapshot> {
 
     return {
       status: "ok",
-      dateRangeLabel: "Last 28 days",
+      dateRangeLabel: "Gender, age, channel & device: last 28 days",
       propertyLabel:
         process.env.NEXT_PUBLIC_GA_MEASUREMENT_ID?.trim() ??
         `Property ${propertyNumericId}`,
       gender,
       age,
       countries,
+      countriesSource,
       channels,
       devices,
     };
@@ -523,8 +573,8 @@ async function loadGaAudienceSnapshot(): Promise<GaAudienceSnapshot> {
 
 const getCachedGaAudienceSnapshot = unstable_cache(
   async () => loadGaAudienceSnapshot(),
-  ["ga-audience-demographics", "v13-cleanup"],
-  { revalidate: 300 },
+  ["ga-audience-demographics", "v14-realtime-country"],
+  { revalidate: 30 },
 );
 
 export async function getGaAudienceSnapshot(): Promise<GaAudienceSnapshot> {
