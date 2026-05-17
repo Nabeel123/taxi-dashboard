@@ -3,7 +3,8 @@
  * Lists GA4 properties and web stream measurement IDs visible to the service account.
  * Use after adding the account email in GA4 → Admin → Access management (Viewer).
  *
- * Reads GA_SERVICE_ACCOUNT_PATH, else ./ga4-key.json, else ./secret.json (repo root).
+ * Credentials: GOOGLE_SERVICE_ACCOUNT_G_ANALYTICS (preferred), then GOOGLE_SERVICE_ACCOUNT;
+ * then GOOGLE_APPLICATION_CREDENTIALS (JSON file path).
  */
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
@@ -13,26 +14,65 @@ import { v1beta } from "@google-analytics/admin";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..");
 
-function resolveCredentialPath() {
-  const fromEnv = process.env.GA_SERVICE_ACCOUNT_PATH?.trim();
-  if (fromEnv) {
-    const p = path.isAbsolute(fromEnv) ? fromEnv : path.join(repoRoot, fromEnv);
-    if (existsSync(p)) return p;
+const ENV_GA_ANALYTICS = "GOOGLE_SERVICE_ACCOUNT_G_ANALYTICS";
+const ENV_GOOGLE_SA = "GOOGLE_SERVICE_ACCOUNT";
+
+function readEnvJsonString(varName) {
+  const v = process.env[varName];
+  if (v == null) return undefined;
+  let s = v.trim();
+  if (
+    s.length >= 2 &&
+    ((s.startsWith("'") && s.endsWith("'")) || (s.startsWith('"') && s.endsWith('"')))
+  ) {
+    s = s.slice(1, -1).trim();
   }
-  const ga4 = path.join(repoRoot, "ga4-key.json");
-  if (existsSync(ga4)) return ga4;
-  const sec = path.join(repoRoot, "secret.json");
-  if (existsSync(sec)) return sec;
-  return null;
+  return s.length > 0 ? s : undefined;
 }
 
-const secretPath = resolveCredentialPath();
-if (!secretPath) {
-  console.error("Missing credential file. Add ga4-key.json or secret.json, or set GA_SERVICE_ACCOUNT_PATH.");
+function loadCredentialsObject() {
+  const rawGa = readEnvJsonString(ENV_GA_ANALYTICS);
+  if (rawGa) {
+    try {
+      return JSON.parse(rawGa);
+    } catch {
+      console.error(`${ENV_GA_ANALYTICS} is set but is not valid JSON.`);
+      process.exit(1);
+    }
+  }
+
+  const rawGen = readEnvJsonString(ENV_GOOGLE_SA);
+  if (rawGen) {
+    try {
+      return JSON.parse(rawGen);
+    } catch {
+      console.error(`${ENV_GOOGLE_SA} is set but is not valid JSON.`);
+      process.exit(1);
+    }
+  }
+
+  const adc = process.env.GOOGLE_APPLICATION_CREDENTIALS?.trim();
+  if (adc) {
+    if (!existsSync(adc)) {
+      console.error(`GOOGLE_APPLICATION_CREDENTIALS file not found: ${adc}`);
+      process.exit(1);
+    }
+    try {
+      return JSON.parse(readFileSync(adc, "utf8"));
+    } catch {
+      console.error("GOOGLE_APPLICATION_CREDENTIALS file is not valid JSON.");
+      process.exit(1);
+    }
+  }
+
+  console.error(`Set one of:
+  ${ENV_GA_ANALYTICS} — full service-account JSON (GA4 key; preferred)
+  ${ENV_GOOGLE_SA} — full service-account JSON (fallback)
+  GOOGLE_APPLICATION_CREDENTIALS — absolute path to key JSON`);
   process.exit(1);
 }
 
-const creds = JSON.parse(readFileSync(secretPath, "utf8"));
+const creds = loadCredentialsObject();
 const client = new v1beta.AnalyticsAdminServiceClient({
   credentials: creds,
   scopes: ["https://www.googleapis.com/auth/analytics.readonly"],

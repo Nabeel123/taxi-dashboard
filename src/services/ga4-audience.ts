@@ -1,8 +1,5 @@
 import "server-only";
 
-import { existsSync, readFileSync } from "node:fs";
-import path from "node:path";
-
 import { BetaAnalyticsDataClient } from "@google-analytics/data";
 import { v1beta as analyticsAdmin } from "@google-analytics/admin";
 import { unstable_cache } from "next/cache";
@@ -105,35 +102,6 @@ function formatGoogleRpcError(e: unknown): string {
   return "Google API request failed.";
 }
 
-
-/**
- * Resolves path to a local service-account JSON file:
- * GA_SERVICE_ACCOUNT_PATH if that file exists, else ./ga4-key.json, else ./secret.json
- */
-function getSecretFilePath(): string | null {
-  const fromEnv = process.env.GA_SERVICE_ACCOUNT_PATH?.trim();
-  if (fromEnv) {
-    const p = path.isAbsolute(fromEnv)
-      ? fromEnv
-      : path.join(/* turbopackIgnore: true */ process.cwd(), fromEnv);
-    if (existsSync(p)) return p;
-  }
-  const ga4Key = path.join(/* turbopackIgnore: true */ process.cwd(), "ga4-key.json");
-  if (existsSync(ga4Key)) return ga4Key;
-  const def = path.join(/* turbopackIgnore: true */ process.cwd(), "secret.json");
-  return existsSync(def) ? def : null;
-}
-
-function readSecretPayload(): Record<string, unknown> | null {
-  const filePath = getSecretFilePath();
-  if (!filePath || !existsSync(filePath)) return null;
-  try {
-    return JSON.parse(readFileSync(filePath, "utf8")) as Record<string, unknown>;
-  } catch {
-    return null;
-  }
-}
-
 /** Accepts standard GCP key JSON or `{ "serviceAccount": {...} }` / `{ "googleServiceAccount": {...} }`. */
 function parseServiceAccountFields(
   o: Record<string, unknown>,
@@ -148,27 +116,77 @@ function parseServiceAccountFields(
   return undefined;
 }
 
+const ENV_GA_ANALYTICS = "GOOGLE_SERVICE_ACCOUNT_G_ANALYTICS";
+const ENV_GOOGLE_SA = "GOOGLE_SERVICE_ACCOUNT";
+
+/** Normalize .env values that were wrapped in '...' or "..." (some loaders keep the delimiters). */
+function readEnvJsonString(varName: string): string | undefined {
+  const v = process.env[varName];
+  if (v == null) return undefined;
+  let s = v.trim();
+  if (
+    s.length >= 2 &&
+    ((s.startsWith("'") && s.endsWith("'")) || (s.startsWith('"') && s.endsWith('"')))
+  ) {
+    s = s.slice(1, -1).trim();
+  }
+  return s.length > 0 ? s : undefined;
+}
+
+type GaEnvParseResult =
+  | { status: "ok"; payload: Record<string, unknown> }
+  | { status: "absent" }
+  | { status: "invalid_json"; varName: string }
+  | { status: "missing_fields"; varName: string };
+
+/** GA4 keys: `GOOGLE_SERVICE_ACCOUNT_G_ANALYTICS` first, then `GOOGLE_SERVICE_ACCOUNT`. */
+function parseGaServiceAccountEnv(): GaEnvParseResult {
+  const rawGa = readEnvJsonString(ENV_GA_ANALYTICS);
+  if (rawGa) {
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(rawGa) as Record<string, unknown>;
+    } catch {
+      return { status: "invalid_json", varName: ENV_GA_ANALYTICS };
+    }
+    if (!parseServiceAccountFields(parsed)) {
+      return { status: "missing_fields", varName: ENV_GA_ANALYTICS };
+    }
+    return { status: "ok", payload: parsed };
+  }
+  const rawGen = readEnvJsonString(ENV_GOOGLE_SA);
+  if (rawGen) {
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(rawGen) as Record<string, unknown>;
+    } catch {
+      return { status: "invalid_json", varName: ENV_GOOGLE_SA };
+    }
+    if (!parseServiceAccountFields(parsed)) {
+      return { status: "missing_fields", varName: ENV_GOOGLE_SA };
+    }
+    return { status: "ok", payload: parsed };
+  }
+  return { status: "absent" };
+}
+
 /** Full service-account JSON for googleapis clients (includes project_id, etc.). */
 function getServiceAccountCredentialsJson(): Record<string, unknown> | undefined {
-  const raw = process.env.GA_SERVICE_ACCOUNT_JSON?.trim();
-  if (raw) {
-    try {
-      const o = JSON.parse(raw) as Record<string, unknown>;
-      if (parseServiceAccountFields(o)) return o;
-    } catch {
-      /* ignore */
-    }
-  }
-  const filePayload = readSecretPayload();
-  if (filePayload && parseServiceAccountFields(filePayload)) return filePayload;
-  return undefined;
+  const r = parseGaServiceAccountEnv();
+  return r.status === "ok" ? r.payload : undefined;
+}
+
+/** Alias: same credentials as {@link getServiceAccountCredentialsJson}, `null` if missing. */
+function getGaCredentialPayload(): Record<string, unknown> | null {
+  return getServiceAccountCredentialsJson() ?? null;
 }
 
 function getServiceCredentials():
   | { client_email: string; private_key: string }
   | undefined {
-  const o = getServiceAccountCredentialsJson();
-  return o ? parseServiceAccountFields(o) : undefined;
+  const json = getServiceAccountCredentialsJson();
+  if (!json) return undefined;
+  return parseServiceAccountFields(json)!;
 }
 
 /**
@@ -191,31 +209,20 @@ function parseNumericPropertyId(raw: string | number | undefined | null): string
 
 /** OAuth numeric id on the key JSON — not the same as GA4 Property ID. */
 function getServiceAccountClientIdFromKey(): string | null {
-  const payload = readSecretPayload();
-  if (payload) {
-    const top = payload.client_id;
-    if (typeof top === "string" || typeof top === "number") return String(top).trim();
-    const nested =
-      (payload.serviceAccount as Record<string, unknown> | undefined)?.client_id ??
-      (payload.googleServiceAccount as Record<string, unknown> | undefined)?.client_id;
-    if (typeof nested === "string" || typeof nested === "number") return String(nested).trim();
-  }
-  const raw = process.env.GA_SERVICE_ACCOUNT_JSON?.trim();
-  if (raw) {
-    try {
-      const o = JSON.parse(raw) as Record<string, unknown>;
-      const cid = o.client_id;
-      if (typeof cid === "string" || typeof cid === "number") return String(cid).trim();
-    } catch {
-      /* ignore */
-    }
-  }
+  const payload = getGaCredentialPayload();
+  if (!payload) return null;
+  const top = payload.client_id;
+  if (typeof top === "string" || typeof top === "number") return String(top).trim();
+  const nested =
+    (payload.serviceAccount as Record<string, unknown> | undefined)?.client_id ??
+    (payload.googleServiceAccount as Record<string, unknown> | undefined)?.client_id;
+  if (typeof nested === "string" || typeof nested === "number") return String(nested).trim();
   return null;
 }
 
 /** If the user set a non-numeric "property id" (e.g. a hash or name), explain the correct format. */
 function invalidExplicitPropertyIdMessage(): string | null {
-  const payload = readSecretPayload();
+  const payload = getGaCredentialPayload();
   const checks: { label: string; value: string }[] = [];
 
   const envGa4 = process.env.GA4_PROPERTY_ID?.trim();
@@ -227,32 +234,33 @@ function invalidExplicitPropertyIdMessage(): string | null {
     for (const key of ["ga4PropertyId", "GA4_PROPERTY_ID", "propertyId"] as const) {
       const v = payload[key];
       if (typeof v === "string" && v.trim())
-        checks.push({ label: `credentials JSON → ${key}`, value: v.trim() });
-      else if (typeof v === "number") checks.push({ label: `credentials JSON → ${key}`, value: String(v) });
+        checks.push({ label: `service account JSON (env) → ${key}`, value: v.trim() });
+      else if (typeof v === "number")
+        checks.push({ label: `service account JSON (env) → ${key}`, value: String(v) });
     }
   }
 
   const saClientId = getServiceAccountClientIdFromKey();
 
   for (const { label, value } of checks) {
-    if (parseNumericPropertyId(value) === null) {
+    const parsed = parseNumericPropertyId(value);
+    if (parsed === null) {
       return `${label} is not a valid GA4 Property ID (must be digits only, e.g. 391234567, or "properties/391234567"). Open Google Analytics → Admin → Property settings and copy "PROPERTY ID". Names like "ga4-analytics-reader" and long hex strings are not property ids.`;
     }
-    const parsed = parseNumericPropertyId(value);
-    if (parsed && saClientId && parsed === saClientId) {
+    if (saClientId && parsed === saClientId) {
       return `${label} is set to your Google Cloud service account client_id (from the key JSON), not your GA4 Property ID. In Google Analytics open Admin → Property settings and copy Property ID (it differs from client_id and private_key_id). Use GA4_PROPERTY_ID in .env.local (server-only), not NEXT_PUBLIC_GA4_PROPERTY_ID, unless you intentionally expose the id to the browser.`;
     }
   }
   return null;
 }
 
-function getNumericPropertyIdFromSecrets(): string | null {
-  const fromEnv =
+function getNumericPropertyIdFromEnv(): string | null {
+  const fromEnvVars =
     parseNumericPropertyId(process.env.GA4_PROPERTY_ID) ??
     parseNumericPropertyId(process.env.NEXT_PUBLIC_GA4_PROPERTY_ID);
-  if (fromEnv) return fromEnv;
+  if (fromEnvVars) return fromEnvVars;
 
-  const payload = readSecretPayload();
+  const payload = getGaCredentialPayload();
   if (!payload) return null;
 
   for (const key of ["ga4PropertyId", "GA4_PROPERTY_ID", "propertyId"] as const) {
@@ -342,8 +350,8 @@ async function resolveNumericPropertyId(): Promise<{
   /** Set when measurement-id lookup via Admin API throws (permissions, API disabled, network). */
   adminLookupError: string | null;
 }> {
-  const fromSecrets = getNumericPropertyIdFromSecrets();
-  if (fromSecrets) return { id: fromSecrets, adminLookupError: null };
+  const fromEnv = getNumericPropertyIdFromEnv();
+  if (fromEnv) return { id: fromEnv, adminLookupError: null };
 
   const measurementId = normalizeMeasurementId(process.env.NEXT_PUBLIC_GA_MEASUREMENT_ID ?? "");
   if (!measurementId) return { id: null, adminLookupError: null };
@@ -410,20 +418,25 @@ async function runDimensionBreakdown(
 async function loadGaAudienceSnapshot(): Promise<GaAudienceSnapshot> {
   const creds = getServiceCredentials();
   const hasAdc = Boolean(process.env.GOOGLE_APPLICATION_CREDENTIALS);
-  const secretPath = getSecretFilePath();
 
   if (!creds && !hasAdc) {
-    if (secretPath) {
+    const envResult = parseGaServiceAccountEnv();
+    if (envResult.status === "invalid_json") {
       return {
         status: "not_configured",
-        message:
-          `Found ${path.basename(secretPath)} but could not read a service account (need client_email and private_key at the top level, or under serviceAccount / googleServiceAccount). Grant that account Viewer on the GA4 property.`,
+        message: `${envResult.varName} is set but is not valid JSON. In .env use one line or wrap in quotes; use \\n inside private_key.`,
+      };
+    }
+    if (envResult.status === "missing_fields") {
+      return {
+        status: "not_configured",
+        message: `${envResult.varName} is missing client_email and private_key (or nested serviceAccount / googleServiceAccount). Grant that account Viewer on the GA4 property.`,
       };
     }
     return {
       status: "not_configured",
       message:
-        "Add ga4-key.json or secret.json in the project root with your Google Cloud service-account key JSON, set GA_SERVICE_ACCOUNT_PATH to another file, use GA_SERVICE_ACCOUNT_JSON, or set GOOGLE_APPLICATION_CREDENTIALS. Grant the account Viewer on the GA4 property. Set ga4PropertyId (numeric only) in that JSON or GA4_PROPERTY_ID / NEXT_PUBLIC_GA4_PROPERTY_ID to skip Admin API stream lookup.",
+        `Set ${ENV_GA_ANALYTICS} (preferred for GA4) or ${ENV_GOOGLE_SA} to your GCP service-account key JSON, or set GOOGLE_APPLICATION_CREDENTIALS to a key file path. Grant the account Viewer on the GA4 property. Set GA4_PROPERTY_ID (numeric) or NEXT_PUBLIC_GA_MEASUREMENT_ID for stream lookup.`,
     };
   }
 
@@ -510,7 +523,7 @@ async function loadGaAudienceSnapshot(): Promise<GaAudienceSnapshot> {
 
 const getCachedGaAudienceSnapshot = unstable_cache(
   async () => loadGaAudienceSnapshot(),
-  ["ga-audience-demographics", "v8-channels-devices"],
+  ["ga-audience-demographics", "v13-cleanup"],
   { revalidate: 300 },
 );
 
